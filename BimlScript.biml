@@ -1,0 +1,85 @@
+<#@ template language="C#" #>
+<#@ import namespace="System.Data" #>
+<#
+    var sourceConnectionString = "Data Source=OXNETORBIT-T005;Initial Catalog=BIML_testing;Provider=SQLNCLI11.1;Integrated Security=SSPI;";
+    var connection = new AstOleDbConnectionNode(null) { ConnectionString = sourceConnectionString }; 
+    var importResult = connection.ImportDB("","",ImportOptions.ExcludeForeignKey | ImportOptions.ExcludeColumnDefault | ImportOptions.ExcludeViews);
+    
+    // ==== Metadata database connection details ====
+    // This data source contains the captured information for various data source that are to be on-boarded. The target database will be created before the
+    // BIMLScript runs, and can be modified manually in the generated packages.
+    var metadataConnectionString = "Data Source=OXNETORBIT-T005;Initial Catalog=BIML_testing;Provider=SQLNCLI11.1;Integrated Security=SSPI;";
+    var mdConnection = new AstOleDbConnectionNode(null) { ConnectionString = metadataConnectionString }; 
+    var mdImportResult = mdConnection.ImportDB("","",ImportOptions.ExcludeForeignKey | ImportOptions.ExcludeColumnDefault | ImportOptions.ExcludeViews);
+    String onboarding_data_sources_connections = "SELECT id, hostname, port, database_name FROM metadata.connection WHERE id = 1;";
+    String onboarding_data_source_tables = "SELECT schema_name, table_name, select_stmt FROM metadata.data_asset WHERE connection_id = ";
+    String host, port, database, sourceConnection, connectionId;
+    
+    DataTable MyDataTable = ExternalDataAccess.GetDataTable(metadataConnectionString, onboarding_data_sources_connections);
+    DataTable DataSourceTables; 
+    /*Loop over each target table row in MyDataTable */
+
+#>
+<Biml xmlns="http://schemas.varigence.com/biml.xsd">
+    <Connections>
+        <!-- Creates a connection to the OXNETORBIT-T005\BIML_testing database -->
+        <Connection Name="Source" ConnectionString="<#=sourceConnectionString #>" />
+        
+        <# foreach(DataRow row in MyDataTable.Rows) { 
+            connectionId = row["id"].ToString();
+            host = row["hostname"].ToString();
+            port = row["port"].ToString();
+            database = row["database_name"].ToString();
+            sourceConnection = "Data Source=" + host + ";Initial Catalog='" + database +"';Provider=SQLNCLI11.1;Integrated Security=SSPI;";        
+        
+            onboarding_data_source_tables += connectionId + ";";
+            DataSourceTables = ExternalDataAccess.GetDataTable(metadataConnectionString, onboarding_data_source_tables);
+        #>
+            <Connection Name="<#=row["database_name"].ToString() #>_Source" ConnectionString="<#=sourceConnection #>" />
+        <# }#>
+        <Connection Name="Target" ConnectionString="<#=sourceConnectionString #>" />
+    </Connections>
+    
+
+    <!-- Packages Collection -->
+    <Packages>
+	    <!-- A Package -->
+	    <Package Name="MyTestPackage"  ConstraintMode="Linear">
+		    <!-- A Package's Tasks -->
+		    <Tasks>
+		        <# foreach (var table in importResult.TableNodes) { #>
+                <Dataflow Name="Copy <#=table.Name#>">
+                    <Transformations>
+                        <OleDbSource Name="Retrieve <#=table.Name#>" ConnectionName="Source">
+                            <DirectInput>SELECT * FROM <#=table.SchemaQualifiedName#></DirectInput>
+                        </OleDbSource>
+                        <OleDbDestination Name="Load <#=table.Name#>" ConnectionName="Target">
+                            <ExternalTableOutput Table="<#=table.SchemaQualifiedName#>"/>
+                        </OleDbDestination>
+                    </Transformations>
+                </Dataflow>
+                <# } #>		        
+		    </Tasks>
+	    </Package>
+	        
+  	    <!-- B Package -->
+	    <Package Name="AnotherTestPackage"  ConstraintMode="Linear">
+		    <!-- A Package's Tasks -->
+		    <Tasks>
+		        <# foreach (var table in importResult.TableNodes) { #>
+                <Dataflow Name="Copy <#=table.Name#>">
+                    <Transformations>
+                        <OleDbSource Name="Retrieve <#=table.Name#>" ConnectionName="Source">
+                            <DirectInput>SELECT * FROM <#=table.SchemaQualifiedName#></DirectInput>
+                        </OleDbSource>
+                        <OleDbDestination Name="Load <#=table.Name#>" ConnectionName="Target">
+                            <ExternalTableOutput Table="<#=table.SchemaQualifiedName#>"/>
+                        </OleDbDestination>
+                    </Transformations>
+                </Dataflow>
+                <# } #>		        
+		    </Tasks>
+	    </Package>
+	        
+    </Packages>
+</Biml>

@@ -1,0 +1,115 @@
+<#@ template language="C#" #>
+<#@ import namespace="System.Data" #>
+<#@ code file="XmlHelper.cs" #>
+<#
+    // ==== Metadata database connection details ====
+    // This data source contains the captured information for various data source that are to be on-boarded. The target database will be created before the
+    // BIMLScript runs, and can be modified manually in the generated packages.
+    var metadataConnectionString = "Data Source=OXNETORBIT-T005;Initial Catalog=BIML_testing;Provider=SQLNCLI11.1;Integrated Security=SSPI;";
+    var mdConnection = new AstOleDbConnectionNode(null) { ConnectionString = metadataConnectionString }; 
+    var mdImportResult = mdConnection.ImportDB("","",ImportOptions.ExcludeForeignKey | ImportOptions.ExcludeColumnDefault | ImportOptions.ExcludeViews);
+    String onboarding_data_sources_connections = "SELECT id, hostname, port, database_name FROM metadata.connection WHERE id IN (2)";
+    
+    //String onboarding_data_connections = "SELECT id, hostname, port, database_name FROM metadata.connection";
+    
+    /*
+        a CONNECTION can have 1..* DATA_ASSETS.
+        each DATA_ASSET can be mapped to 1..* other DATA_ASSETS (but this is limited by having the same table name)
+    */
+    
+    /* --- Erroring data source. - These have some problem that prevent them from being generated.
+    
+        Database                                | Tables having problems generating     | Asset ID
+        ====                                    | ====                                  | ====
+        PSS RAW - Cardiac surveillance          |   [staging].[surveillance]            | 30
+                             [DB conn ID = 2]   |   [dbo].[surveillance]                | 31 
+                                                |   [dbo].[surveillance2]               | 32
+        PSS RAW - ICNARC     [DB conn ID = 11]  |                                       | (failed at table level)
+        PSS RAW - IC Reports [DB conn = 12]     |                                       | (failed at table level) - Database empty!!
+        PSS RAW - old NOC    [DB conn = 20]     |                                       | (failed at table level)
+        PSS RAW - Pheonix    [DB conn = 23]     |                                       | (failed at table level) - Database empty!!
+        
+    */
+    String onboarding_data_source_tables = "SELECT schema_name, table_name, select_stmt FROM metadata.data_asset WHERE active=1 AND connection_id = ";
+    String host, port, database, sourceConnection;
+    //String sqlServerConnection;
+    String connectionId, table, schema, selectStmt, escapedTableName; // data from meta data table for source tables
+    String target_host, target_port, target_database, target_schema, targetConnection;
+    
+    // Hard coding the target database details for now. The target database name will follow the newly proposed naming scheme.
+    target_host = "OXNETORBIT-T005";
+    target_port = "1433";
+    target_schema = "raw";
+
+    DataTable Connections = ExternalDataAccess.GetDataTable(metadataConnectionString, onboarding_data_sources_connections);    // original
+    //DataTable Connections = ExternalDataAccess.GetDataTable(metadataConnectionString, onboarding_data_connections);
+    DataTable DataSourceTables;
+#>
+
+<Biml xmlns="http://schemas.varigence.com/biml.xsd">
+
+    <Connections>
+        <# foreach(DataRow row in Connections.Rows) { 
+            connectionId = row["id"].ToString();
+            host = row["hostname"].ToString();
+            port = row["port"].ToString();
+            database = row["database_name"].ToString();
+            
+            if (database.Contains("carevue"))
+                target_database = "Carevue_OLD";
+                
+            else if (database.Contains("CIS"))
+                target_database = "CIS Reporting";
+            else 
+                target_database = database;
+
+            sourceConnection = "Data Source=" + host + ";Initial Catalog='" + database +"';Provider=SQLNCLI11.1;Integrated Security=SSPI;";
+            targetConnection = "Data Source=" + target_host + ";Initial Catalog='" + target_database +"';Provider=SQLNCLI11.1;Integrated Security=SSPI;";
+            
+            // sqlServerConnection =  "Data Source=" + host + ";Initial Catalog='" + database +"';Provider=SQLNCLI11.1;Integrated Security=SSPI;";
+        #>
+            <Connection Name="<#=database #>_Source" ConnectionString="<#=sourceConnection #>" />
+            <Connection Name="<#=database #>_Target" ConnectionString="<#=targetConnection #>" />
+            
+        <# }#>
+    </Connections>
+
+    <Packages>
+        <# foreach(DataRow row in Connections.Rows) { 
+            connectionId = row["id"].ToString();
+            onboarding_data_source_tables += connectionId ;
+            database = row["database_name"].ToString();
+            DataSourceTables = ExternalDataAccess.GetDataTable(metadataConnectionString, onboarding_data_source_tables);
+        #>
+            <Package Name="<#=database #>"  ConstraintMode="Linear">
+                <Tasks>
+                    <# foreach(DataRow dataAsset in DataSourceTables.Rows) {
+                       schema = dataAsset["schema_name"].ToString();
+                        table = dataAsset["table_name"].ToString();
+                        selectStmt = XmlHelper.Capitalise(dataAsset["select_stmt"].ToString());
+                        escapedTableName = "[" + target_schema + "].[" + table + "]";
+                    #>
+                        <ExecuteSQL ConnectionName="<#=database #>_Target" Name="Truncate <#=table#> (<#=schema#>)">
+                            <DirectInput>TRUNCATE TABLE <#=escapedTableName#></DirectInput>
+                        </ExecuteSQL>
+                        <Dataflow Name="On-board <#=table#> (<#=schema#>)">
+                            <Transformations>
+                                <OleDbSource Name="Capture <#=table#> (<#=schema#>)" ConnectionName="<#=database #>_Source">
+                                    <DirectInput>
+                                        <!-- Use CDATA tag to handle any unruly special characters that might find themselves in the select statement -->
+                                        <![CDATA[
+                                            <#=selectStmt #>
+                                        ]]>
+                                    </DirectInput>
+                                </OleDbSource>
+                                <OleDbDestination Name="Load <#=table#> (<#=target_schema#>)" ConnectionName="<#=database #>_Target">
+                                    <ExternalTableOutput Table="<#=escapedTableName#>" />
+                                </OleDbDestination>
+                            </Transformations>
+                        </Dataflow>
+                    <# }#>
+                </Tasks>
+            </Package>
+        <# }#>
+    </Packages>
+</Biml>
