@@ -8,16 +8,17 @@
     var metadataConnectionString = "Data Source=OXNETORBIT-T005;Initial Catalog=BIML_testing;Provider=SQLNCLI11.1;Integrated Security=SSPI;";
     var mdConnection = new AstOleDbConnectionNode(null) { ConnectionString = metadataConnectionString }; 
     var mdImportResult = mdConnection.ImportDB("","",ImportOptions.ExcludeForeignKey | ImportOptions.ExcludeColumnDefault | ImportOptions.ExcludeViews);
-    String onboarding_data_sources_connections = "SELECT id, hostname, port, database_name FROM metadata.connection WHERE id IN (2)";
+    //String onboarding_data_sources_connections = "SELECT id, hostname, port, database_name FROM metadata.connection WHERE id IN (2)";
     
-    //String onboarding_data_connections = "SELECT id, hostname, port, database_name FROM metadata.connection";
+    String onboarding_data_connections = "SELECT id, hostname, port, database_name FROM metadata.connection";
+    
+    String distinct_sources = "select distinct(da.connection_id), c.hostname, c.database_name from metadata.data_mapping dm inner join metadata.data_asset da on dm.source_data_asset_id = da.id inner join metadata.connection c on da.connection_id = c.id";
     
     /*
         a CONNECTION can have 1..* DATA_ASSETS.
         each DATA_ASSET can be mapped to 1..* other DATA_ASSETS (but this is limited by having the same table name)
-    */
     
-    /* --- Erroring data source. - These have some problem that prevent them from being generated.
+     --- Erroring data source. - These have some problem that prevent them from being generated.
     
         Database                                | Tables having problems generating     | Asset ID
         ====                                    | ====                                  | ====
@@ -31,23 +32,32 @@
         
     */
     String onboarding_data_source_tables = "SELECT schema_name, table_name, select_stmt FROM metadata.data_asset WHERE active=1 AND connection_id = ";
-    String host, port, database, sourceConnection;
-    //String sqlServerConnection;
-    String connectionId, table, schema, selectStmt, escapedTableName; // data from meta data table for source tables
-    String target_host, target_port, target_database, target_schema, targetConnection;
+    String host, port, database, source_connection_name;
+    String sqlServerConnection;
+    String connectionId, table_name, source_schema, selectStmt, escapedTableName; // data from meta data table for source tables
+    String target_host, target_port, target_database, target_schema, target_connection_name;
     
     // Hard coding the target database details for now. The target database name will follow the newly proposed naming scheme.
     target_host = "OXNETORBIT-T005";
     target_port = "1433";
     target_schema = "raw";
 
-    DataTable Connections = ExternalDataAccess.GetDataTable(metadataConnectionString, onboarding_data_sources_connections);    // original
-    //DataTable Connections = ExternalDataAccess.GetDataTable(metadataConnectionString, onboarding_data_connections);
+    String mapped_data_assets = "select	da.connection_id, src_con.hostname + '-' + src_con.database_name as source_connection_name, src_con.hostname as source_host, src_con.database_name as source_database,  da.schema_name as source_schema, da.table_name, da.select_stmt as source_select, da2.connection_id, tgt_con.hostname + '-' + tgt_con.database_name as target_connection_name, tgt_con.hostname as target_host, tgt_con.database_name as target_database, da2.schema_name as target_schema from metadata.data_mapping dm inner join metadata.data_asset da on dm.source_data_asset_id = da.id inner join metadata.connection src_con on da.connection_id = src_con.id inner join metadata.data_asset da2 on dm.target_data_asset_id = da2.id inner join metadata.connection tgt_con on da2.connection_id = tgt_con.id where da.active = 1 and da.connection_id = ";
+    //String mapped_data_assets = "select id, hostname, database_name from metadata.connection where id in (2,3)";
+    String mapped_data_sources = "select distinct(da.connection_id), c.hostname, c.database_name from metadata.data_mapping dm inner join metadata.data_asset da on dm.source_data_asset_id = da.id inner join metadata.connection c on da.connection_id = c.id";
+    
+    //DataTable Connections = ExternalDataAccess.GetDataTable(metadataConnectionString, onboarding_data_sources_connections);    // original
+    
+    DataTable Connections = ExternalDataAccess.GetDataTable(metadataConnectionString, onboarding_data_connections); //establishes credentials for all known connections 
+    DataTable MappedSources = ExternalDataAccess.GetDataTable(metadataConnectionString, mapped_data_sources);       //gets details for those (source) data sources that have mappings. We are doing this so we do not generate empty packages. 
+    
     DataTable DataSourceTables;
+    DataTable DataMappings;
 #>
 
 <Biml xmlns="http://schemas.varigence.com/biml.xsd">
 
+    <!-- Create connections for all known data sources and targets -->
     <Connections>
         <# foreach(DataRow row in Connections.Rows) { 
             connectionId = row["id"].ToString();
@@ -55,54 +65,43 @@
             port = row["port"].ToString();
             database = row["database_name"].ToString();
             
-            if (database.Contains("carevue"))
-                target_database = "Carevue_OLD";
-                
-            else if (database.Contains("CIS"))
-                target_database = "CIS Reporting";
-            else 
-                target_database = database;
-
-            sourceConnection = "Data Source=" + host + ";Initial Catalog='" + database +"';Provider=SQLNCLI11.1;Integrated Security=SSPI;";
-            targetConnection = "Data Source=" + target_host + ";Initial Catalog='" + target_database +"';Provider=SQLNCLI11.1;Integrated Security=SSPI;";
-            
-            // sqlServerConnection =  "Data Source=" + host + ";Initial Catalog='" + database +"';Provider=SQLNCLI11.1;Integrated Security=SSPI;";
+            sqlServerConnection =  "Data Source=" + host + ";Initial Catalog='" + database +"';Provider=SQLNCLI11.1;Integrated Security=SSPI;";
         #>
-            <Connection Name="<#=database #>_Source" ConnectionString="<#=sourceConnection #>" />
-            <Connection Name="<#=database #>_Target" ConnectionString="<#=targetConnection #>" />
-            
+            <Connection Name="<#=host#>-<#=database #>" ConnectionString="<#=sqlServerConnection #>" />
         <# }#>
     </Connections>
 
+    <!-- Create SSIS packages for those data source that have been mapped -->
     <Packages>
-        <# foreach(DataRow row in Connections.Rows) { 
-            connectionId = row["id"].ToString();
-            onboarding_data_source_tables += connectionId ;
+        <# foreach(DataRow row in MappedSources.Rows) { 
+            connectionId = row["connection_id"].ToString();
             database = row["database_name"].ToString();
-            DataSourceTables = ExternalDataAccess.GetDataTable(metadataConnectionString, onboarding_data_source_tables);
+            
+            DataMappings = ExternalDataAccess.GetDataTable(metadataConnectionString, mapped_data_assets + connectionId);
         #>
-            <Package Name="<#=database #>"  ConstraintMode="Linear">
+            <Package Name="FULL-LOAD_<#=database #>"  ConstraintMode="Linear">
                 <Tasks>
-                    <# foreach(DataRow dataAsset in DataSourceTables.Rows) {
-                       schema = dataAsset["schema_name"].ToString();
-                        table = dataAsset["table_name"].ToString();
-                        selectStmt = XmlHelper.Capitalise(dataAsset["select_stmt"].ToString());
-                        escapedTableName = "[" + target_schema + "].[" + table + "]";
+                    <# foreach(DataRow dataAsset in DataMappings.Rows) {
+                        source_schema = dataAsset["source_schema"].ToString();
+                        table_name = dataAsset["table_name"].ToString();
+                        selectStmt = XmlHelper.Capitalise(dataAsset["source_select"].ToString());
+                        escapedTableName = "[" + target_schema + "].[" + table_name + "]";
+                        
+                        source_connection_name = dataAsset["source_connection_name"].ToString();
+                        target_connection_name = dataAsset["target_connection_name"].ToString();
                     #>
-                        <ExecuteSQL ConnectionName="<#=database #>_Target" Name="Truncate <#=table#> (<#=schema#>)">
+                        <ExecuteSQL ConnectionName="<#=target_connection_name #>" Name="Truncate <#=table_name#> (<#=target_schema#>)">
                             <DirectInput>TRUNCATE TABLE <#=escapedTableName#></DirectInput>
                         </ExecuteSQL>
-                        <Dataflow Name="On-board <#=table#> (<#=schema#>)">
+                        <Dataflow Name="On-board <#=table_name#> (<#=source_schema#>) &gt; (<#=target_schema#>)">
                             <Transformations>
-                                <OleDbSource Name="Capture <#=table#> (<#=schema#>)" ConnectionName="<#=database #>_Source">
+                                <OleDbSource ConnectionName="<#=source_connection_name#>" Name="Capture <#=table_name#> (<#=source_schema#>)">
                                     <DirectInput>
                                         <!-- Use CDATA tag to handle any unruly special characters that might find themselves in the select statement -->
-                                        <![CDATA[
-                                            <#=selectStmt #>
-                                        ]]>
+                                        <![CDATA[ <#=selectStmt #> ]]>
                                     </DirectInput>
                                 </OleDbSource>
-                                <OleDbDestination Name="Load <#=table#> (<#=target_schema#>)" ConnectionName="<#=database #>_Target">
+                                <OleDbDestination ConnectionName="<#=target_connection_name #>" Name="Load <#=table_name#> (<#=target_schema#>)" >
                                     <ExternalTableOutput Table="<#=escapedTableName#>" />
                                 </OleDbDestination>
                             </Transformations>
@@ -112,4 +111,5 @@
             </Package>
         <# }#>
     </Packages>
+        
 </Biml>
