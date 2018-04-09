@@ -8,11 +8,9 @@
     var metadataConnectionString = "Data Source=OXNETORBIT-T005;Initial Catalog=BIML_testing;Provider=SQLNCLI11.1;Integrated Security=SSPI;";
     var mdConnection = new AstOleDbConnectionNode(null) { ConnectionString = metadataConnectionString }; 
     var mdImportResult = mdConnection.ImportDB("","",ImportOptions.ExcludeForeignKey | ImportOptions.ExcludeColumnDefault | ImportOptions.ExcludeViews);
-    //String onboarding_data_sources_connections = "SELECT id, hostname, port, database_name FROM metadata.connection WHERE id IN (2)";
     
     String onboarding_data_connections = "SELECT id, hostname, port, database_name FROM metadata.connection";
-    
-    String distinct_sources = "select distinct(da.connection_id), c.hostname, c.database_name from metadata.data_mapping dm inner join metadata.data_asset da on dm.source_data_asset_id = da.id inner join metadata.connection c on da.connection_id = c.id";
+    String distinct_sources = "select distinct(da.connection_id), dm.mapping_action, c.hostname, c.database_name from metadata.data_mapping dm inner join metadata.data_asset da on dm.source_data_asset_id = da.id inner join metadata.connection c";
     
     /*
         a CONNECTION can have 1..* DATA_ASSETS.
@@ -31,23 +29,20 @@
         PSS RAW - Pheonix    [DB conn = 23]     |                                       | (failed at table level) - Database empty!!
         
     */
-    String onboarding_data_source_tables = "SELECT schema_name, table_name, select_stmt FROM metadata.data_asset WHERE active=1 AND connection_id = ";
-    String host, port, database, source_connection_name;
+    String onboarding_data_source_tables = "SELECT schema_name, table_name, select_stmt, conditional_select FROM metadata.data_asset WHERE active=1 AND connection_id = ";
+    String host, port, database, source_connection_name, target_connection_name;
     String sqlServerConnection;
     String connectionId, table_name, source_schema, selectStmt, escapedTableName; // data from meta data table for source tables
-    String target_host, target_port, target_database, target_schema, target_connection_name;
+    String target_database, target_schema, conditional_variable_from_target;
+    String onboarding_condition, mapping_action;
+    bool truncate_target, other_operation_on_target;
+    
+    //String target_host, target_port;
     
     // Hard coding the target database details for now. The target database name will follow the newly proposed naming scheme.
-    target_host = "OXNETORBIT-T005";
-    target_port = "1433";
-    target_schema = "raw";
-
-    String mapped_data_assets = "select	da.connection_id, src_con.hostname + '-' + src_con.database_name as source_connection_name, src_con.hostname as source_host, src_con.database_name as source_database,  da.schema_name as source_schema, da.table_name, da.select_stmt as source_select, da2.connection_id, tgt_con.hostname + '-' + tgt_con.database_name as target_connection_name, tgt_con.hostname as target_host, tgt_con.database_name as target_database, da2.schema_name as target_schema from metadata.data_mapping dm inner join metadata.data_asset da on dm.source_data_asset_id = da.id inner join metadata.connection src_con on da.connection_id = src_con.id inner join metadata.data_asset da2 on dm.target_data_asset_id = da2.id inner join metadata.connection tgt_con on da2.connection_id = tgt_con.id where da.active = 1 and da.connection_id = ";
-    //String mapped_data_assets = "select id, hostname, database_name from metadata.connection where id in (2,3)";
-    String mapped_data_sources = "select distinct(da.connection_id), c.hostname, c.database_name from metadata.data_mapping dm inner join metadata.data_asset da on dm.source_data_asset_id = da.id inner join metadata.connection c on da.connection_id = c.id";
-    
-    //DataTable Connections = ExternalDataAccess.GetDataTable(metadataConnectionString, onboarding_data_sources_connections);    // original
-    
+    String mapped_data_sources = "select distinct(da.connection_id), dm.mapping_action, c.hostname, c.database_name from metadata.data_mapping dm inner join metadata.data_asset da on dm.source_data_asset_id = da.id inner join metadata.connection c on da.connection_id = c.id";
+    String detailled_data_asset_mapping = "select dm.mapping_action, da.connection_id, src_con.hostname + '-' + src_con.database_name as source_connection_name, src_con.hostname as source_host, src_con.database_name as source_database,  da.schema_name as source_schema, da.table_name, da.select_stmt as source_select, da.conditional_select as conditional_select, dm.conditional_select_variable_from_target , dm.truncate_target_on_load, dm.other_operation_target_on_load, dm.map_operation, da2.connection_id, tgt_con.hostname + '-' + tgt_con.database_name as target_connection_name, tgt_con.hostname as target_host, tgt_con.database_name as target_database, da2.schema_name as target_schema from metadata.data_mapping dm inner join metadata.data_asset da on dm.source_data_asset_id = da.id inner join metadata.connection src_con on da.connection_id = src_con.id inner join metadata.data_asset da2 on dm.target_data_asset_id = da2.id inner join metadata.connection tgt_con on da2.connection_id = tgt_con.id";
+  
     DataTable Connections = ExternalDataAccess.GetDataTable(metadataConnectionString, onboarding_data_connections); //establishes credentials for all known connections 
     DataTable MappedSources = ExternalDataAccess.GetDataTable(metadataConnectionString, mapped_data_sources);       //gets details for those (source) data sources that have mappings. We are doing this so we do not generate empty packages. 
     
@@ -68,48 +63,101 @@
             sqlServerConnection =  "Data Source=" + host + ";Initial Catalog='" + database +"';Provider=SQLNCLI11.1;Integrated Security=SSPI;";
         #>
             <Connection Name="<#=host#>-<#=database #>" ConnectionString="<#=sqlServerConnection #>" />
+            
         <# }#>
     </Connections>
 
-    <!-- Create SSIS packages for those data source that have been mapped -->
+    <!-- Create SSIS packages for those data sources that have been mapped -->
     <Packages>
         <# foreach(DataRow row in MappedSources.Rows) { 
             connectionId = row["connection_id"].ToString();
             database = row["database_name"].ToString();
+            mapping_action = row["mapping_action"].ToString();
             
-            DataMappings = ExternalDataAccess.GetDataTable(metadataConnectionString, mapped_data_assets + connectionId);
+            // add the following clauses to the SELECT statement that selects the details for the data asset mapping
+            // based on the connection id and the mapping_action name
+            String dataMappingSelect =  detailled_data_asset_mapping + " WHERE da.active = 1 and da.connection_id =  " 
+            + connectionId + " and dm.mapping_action = '" + mapping_action +  "' ORDER BY dm.implement_order ASC";
+            DataMappings = ExternalDataAccess.GetDataTable(metadataConnectionString, dataMappingSelect);
         #>
-            <Package Name="FULL-LOAD_<#=database #>"  ConstraintMode="Linear">
-                <Tasks>
-                    <# foreach(DataRow dataAsset in DataMappings.Rows) {
-                        source_schema = dataAsset["source_schema"].ToString();
-                        table_name = dataAsset["table_name"].ToString();
-                        selectStmt = XmlHelper.Capitalise(dataAsset["source_select"].ToString());
-                        escapedTableName = "[" + target_schema + "].[" + table_name + "]";
-                        
-                        source_connection_name = dataAsset["source_connection_name"].ToString();
-                        target_connection_name = dataAsset["target_connection_name"].ToString();
-                    #>
-                        <ExecuteSQL ConnectionName="<#=target_connection_name #>" Name="Truncate <#=table_name#> (<#=target_schema#>)">
-                            <DirectInput>TRUNCATE TABLE <#=escapedTableName#></DirectInput>
-                        </ExecuteSQL>
-                        <Dataflow Name="On-board <#=table_name#> (<#=source_schema#>) &gt; (<#=target_schema#>)">
-                            <Transformations>
-                                <OleDbSource ConnectionName="<#=source_connection_name#>" Name="Capture <#=table_name#> (<#=source_schema#>)">
-                                    <DirectInput>
-                                        <!-- Use CDATA tag to handle any unruly special characters that might find themselves in the select statement -->
-                                        <![CDATA[ <#=selectStmt #> ]]>
-                                    </DirectInput>
-                                </OleDbSource>
-                                <OleDbDestination ConnectionName="<#=target_connection_name #>" Name="Load <#=table_name#> (<#=target_schema#>)" >
-                                    <ExternalTableOutput Table="<#=escapedTableName#>" />
-                                </OleDbDestination>
-                            </Transformations>
-                        </Dataflow>
-                    <# }#>
-                </Tasks>
+            <Package Name="DW-<#=mapping_action #>_<#=database #>"  ConstraintMode="Linear">
+                <Variables>
+                    <Variable Name="DATA_STR" DataType="String">0</Variable>
+                </Variables>
+                
+                <Tasks> 
+                <# 
+                    int lastIndex = DataMappings.Rows.Count - 1;
+                    
+                    foreach(DataRow dataAsset in DataMappings.Rows) {
+                    String mapAct = dataAsset["mapping_action"].ToString();
+                    source_schema = dataAsset["source_schema"].ToString();
+                    table_name = dataAsset["table_name"].ToString();
+                    String xml_table_name = table_name.Replace(".", "_"); // replacing period in ORACLE provided table names
+                    selectStmt = XmlHelper.Capitalise(dataAsset["source_select"].ToString() + ' ' + dataAsset["conditional_select"]);
+                    
+                    target_schema = dataAsset["target_schema"].ToString();
+                    truncate_target = (bool) dataAsset["truncate_target_on_load"];
+                    other_operation_on_target = (bool) dataAsset["other_operation_target_on_load"];
+                    conditional_variable_from_target = dataAsset["conditional_select_variable_from_target"].ToString();
+                    //escapedTableName = "[" + target_schema + "].[" + xml_table_name + "]";
+                    escapedTableName = "[" + target_schema + "].[" + table_name + "]";
+                    source_connection_name = dataAsset["source_connection_name"].ToString();
+                    target_connection_name = dataAsset["target_connection_name"].ToString();
+                #>
+                    <Container Name="<#=xml_table_name#>_<#=mapAct #>" ConstraintMode="Linear"> 
+                        <Tasks>
+                            <!-- Getting conditional variable from target data  -->
+                            <# if(conditional_variable_from_target != "") {#>
+                            <ExecuteSQL ConnectionName="<#=target_connection_name #>" ResultSet="SingleRow" Name="<#=table_name#> conditional select (<#=target_schema#>)" >
+                                <DirectInput><#=conditional_variable_from_target#></DirectInput>
+                                <Results>
+                                    <Result Name="0" VariableName="User.DATA_STR"></Result>
+                                </Results>
+                            </ExecuteSQL>
+                            <#}#> 
+                            
+                            <# if (truncate_target) {#>
+                            <ExecuteSQL ConnectionName="<#=target_connection_name #>" Name="Truncate <#=table_name#> (<#=target_schema#>)" >
+                                <DirectInput>TRUNCATE TABLE <#=escapedTableName#></DirectInput>
+                            </ExecuteSQL>
+                            <#}#>
+                            
+                            <# if (other_operation_on_target) {#>
+                            <ExecuteSQL ConnectionName="<#=target_connection_name #>" Name="Prepare <#=table_name#> (<#=target_schema#>) for data loading" >
+                                    <DirectInput>TRUNCATE TABLE <#=escapedTableName#></DirectInput>
+                            </ExecuteSQL>
+                            <#}#>
+                                
+                            <!-- Data flow to capture data from the source to the target -->
+                            <Dataflow Name="On-board (<#=source_schema#>) &gt; (<#=target_schema#>)">
+                                <Transformations>
+                                    <!-- Source data asset connection details -->
+                                    <OleDbSource ConnectionName="<#=source_connection_name#>" Name="Capture <#=table_name#> (<#=source_schema#>)">
+                                        <DirectInput>
+                                            <!-- Use CDATA tag to handle any unruly special characters that might find themselves in the select statement -->
+                                            <![CDATA[ <#=selectStmt #> ]]>
+                                        </DirectInput>
+                                        
+                                        <# if(conditional_variable_from_target != "" || conditional_variable_from_target != null) { #>
+                                            <Parameters>
+                                                <Parameter Name="0" VariableName="User.DATA_STR"/>    
+                                            </Parameters>
+                                        <#}#>
+                                    </OleDbSource>
+                                
+                                    <!-- Target data asset connection details -->
+                                    <OleDbDestination ConnectionName="<#=target_connection_name #>" Name="Load <#=table_name#> (<#=target_schema#>)" >
+                                        <ExternalTableOutput Table="<#=escapedTableName#>" />
+                                    </OleDbDestination>
+                                </Transformations>
+                            </Dataflow>
+                                
+                        </Tasks>
+                    </Container>
+                <# } #>
+                </Tasks>    
             </Package>
-        <# }#>
+        <# } #>
     </Packages>
-        
 </Biml>
