@@ -76,7 +76,7 @@
             
             // add the following clauses to the SELECT statement that selects the details for the data asset mapping
             // based on the connection id and the mapping_action name
-            String dataMappingSelect =  detailled_data_asset_mapping + " WHERE da.active = 1 and da.connection_id =  " 
+            String dataMappingSelect =  detailled_data_asset_mapping + " WHERE da.active = 1 and dm.active = 1 and da.connection_id =  " 
             + connectionId + " and dm.mapping_action = '" + mapping_action +  "' ORDER BY dm.implement_order ASC";
             DataMappings = ExternalDataAccess.GetDataTable(metadataConnectionString, dataMappingSelect);
         #>
@@ -125,7 +125,7 @@
                             
                             <# if (other_operation_on_target) {#>
                             <ExecuteSQL ConnectionName="<#=target_connection_name #>" Name="Prepare <#=table_name#> (<#=target_schema#>) for data loading" >
-                                    <DirectInput>TRUNCATE TABLE <#=escapedTableName#></DirectInput>
+                                    <DirectInput>THROW 50000,'Add SQL to operate on target data asset <#=escapedTableName#>',1 </DirectInput>
                             </ExecuteSQL>
                             <#}#>
                                 
